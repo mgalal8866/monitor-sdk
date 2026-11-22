@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Trk\Monitor\Support;
 
+use Illuminate\Database\QueryException;
 use Throwable;
 
 /**
@@ -59,7 +60,7 @@ final class StackTraceBuilder
      */
     private function message(Throwable $e): string
     {
-        if ($e instanceof \Illuminate\Database\QueryException) {
+        if ($e instanceof QueryException) {
             $driverMessage = $e->getPrevious()?->getMessage() ?? 'Query failed';
 
             return SqlSanitizer::sanitizeMessage($driverMessage).' (Connection: '.$e->getConnectionName().', SQL: '.SqlSanitizer::sanitize($e->getSql()).')';

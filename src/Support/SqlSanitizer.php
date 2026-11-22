@@ -15,10 +15,9 @@ final class SqlSanitizer
     {
         $sql = (string) preg_replace([
             "/'(?:[^'\\\\]|\\\\.|'')*'/s",   // single-quoted strings
-            '/"(?:[^"\\\\]|\\\\.)*"(?=\s*(?:[,)=<>]|$|\s+(?:and|or|then|else|end)\b))/i', // double-quoted values (not identifiers in common positions)
             '/\b0x[0-9a-f]+\b/i',             // hex literals
             '/(?<![\w$`.])-?\d+(?:\.\d+)?\b/', // numbers
-        ], ['?', '?', '?', '?'], $sql);
+        ], ['?', '?', '?'], $sql);
 
         // Collapse IN (?, ?, ?) lists so their length does not create distinct statements.
         $sql = (string) preg_replace('/\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)/i', 'in (?)', $sql);

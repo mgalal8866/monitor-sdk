@@ -8,6 +8,7 @@ to your TrkMonitor server, without ever interfering with your application.
 - HMAC-signed requests (the secret never leaves your server), gzip, retries with backoff + jitter
 - Asynchronous by default: your queue, or after the response is sent; disk spool when the server is down
 - Recursive redaction of sensitive data; no bodies, cookies, IPs or e-mails by default
+- Request, query and queue-job monitoring with slow-query detection (see [performance monitoring](docs/performance-monitoring.md))
 
 ## Installation
 
@@ -72,7 +73,7 @@ Monitor::setFingerprint(['payment-gateway-timeout']); // optional custom groupin
 
 ## Documentation
 
-[Configuration](docs/configuration.md) · [Privacy](docs/privacy.md) · [Compatibility](docs/compatibility.md) · [Troubleshooting](docs/troubleshooting.md)
+[Configuration](docs/configuration.md) · [Performance, database & queues](docs/performance-monitoring.md) · [Privacy](docs/privacy.md) · [Compatibility](docs/compatibility.md) · [Troubleshooting](docs/troubleshooting.md)
 
 ## Development
 

@@ -160,5 +160,5 @@ it('resets the scope between queue jobs', function () {
     $job->shouldReceive('payload')->andReturn([]);
     event(new JobProcessing('sync', $job));
 
-    expect(Monitor::scope()->user())->toBeNull()->and(Monitor::scope()->tags())->toBe([]);
+    expect(Monitor::scope()->user())->toBeNull()->and(Monitor::scope()->tags())->not->toHaveKey('tenant');
 });

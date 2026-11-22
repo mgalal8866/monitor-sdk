@@ -19,5 +19,14 @@ Publish with `php artisan vendor:publish --tag=trk-monitor-config` (done by `trk
 | `exclude.exceptions` | — | `[]` | Exception classes (and subclasses) never reported |
 | `max_payload_size` | — | 1 MiB | Payloads are trimmed progressively to fit |
 | `breadcrumbs.max` | — | 50 | Ring buffer size |
+| `breadcrumbs.queries` / `logs` / `http_client` / `queue` | — | `true` | Automatic breadcrumb sources |
+| `performance.slow_query_threshold_ms` | — | 500 | Slow query threshold |
+| `performance.slow_request_threshold_ms` | — | 1000 | Slow request threshold (always reported) |
+| `performance.long_running_job_threshold_ms` | — | 60000 | Long-running job threshold |
+| `database.send_bindings` | — | `false` | Send sanitized bindings with query spans |
+| `database.exclude_tables` / `exclude_connections` | — | queue/cache/session tables | Ignored by query monitoring |
+| `jobs.report_retries` | — | `false` | Report every failed attempt instead of the final failure |
+| `jobs.metadata_allowlist` | — | `[]` | Extra top-level job payload keys in the job context |
+| `exclude.paths` / `exclude.routes` / `exclude.jobs` | — | health/tooling paths | Never monitored as transactions |
 
 Invalid values fall back to safe defaults; `php artisan trk-monitor:status` lists configuration problems.

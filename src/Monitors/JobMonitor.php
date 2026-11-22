@@ -87,22 +87,34 @@ final class JobMonitor
                 return;
             }
 
-            $this->scope->addBreadcrumb([
-                'category' => 'queue',
-                'message' => 'Attempt '.$event->job->attempts().' failed: '.Str::limit($event->exception->getMessage(), 200),
-                'level' => 'error',
-                'data' => ['exception' => $event->exception::class],
-            ]);
+            // Laravel fires JobFailed before JobExceptionOccurred on the final attempt:
+            // that attempt has already been reported and finished by failed().
+            if ($event->job->hasFailed()) {
+                return;
+            }
 
-            // Report only the final failure; JobFailed releases and captures it.
+            $this->addAttemptBreadcrumb($event->job, $event->exception);
+
+            // Intermediate attempt: report only the final failure (unless configured otherwise).
             if (! $this->options->get('jobs.report_retries', false)) {
                 $this->monitor->ignoreException($event->exception);
             }
 
-            if ($this->transaction !== null && $this->isCurrent($event->job)) {
-                $this->transaction->status = 'retrying';
+            // No JobProcessed follows a failed attempt, so finish its transaction here.
+            if ($this->isCurrent($event->job)) {
+                $this->finish('retrying');
             }
         });
+    }
+
+    private function addAttemptBreadcrumb(Job $job, Throwable $e): void
+    {
+        $this->scope->addBreadcrumb([
+            'category' => 'queue',
+            'message' => 'Attempt '.$job->attempts().' failed: '.Str::limit($e->getMessage(), 200),
+            'level' => 'error',
+            'data' => ['exception' => $e::class],
+        ]);
     }
 
     public function failed(JobFailed $event): void
@@ -120,6 +132,7 @@ final class JobMonitor
             }
 
             $this->monitor->releaseException($event->exception);
+            $this->addAttemptBreadcrumb($event->job, $event->exception);
 
             if ($this->options->captures('failed_jobs')) {
                 $this->monitor->captureException($event->exception, ['event_type' => 'job']);
@@ -141,9 +154,7 @@ final class JobMonitor
             return;
         }
 
-        if ($transaction->status !== 'retrying' || $status === 'failed') {
-            $transaction->status = $status;
-        }
+        $transaction->status = $status;
 
         $this->tracer->finish($transaction, (float) $this->options->get('performance.long_running_job_threshold_ms', 60000));
     }
@@ -184,7 +195,7 @@ final class JobMonitor
 
     private function identity(Job $job): string
     {
-        return (string) ($job->uuid() ?? $job->getJobId() ?? spl_object_id($job));
+        return (string) ($job->uuid() ?? $job->getJobId());
     }
 
     private function isCurrent(Job $job): bool
