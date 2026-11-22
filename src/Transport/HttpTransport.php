@@ -17,6 +17,8 @@ use Trk\Monitor\Options;
  * - Compresses bodies with gzip when available.
  * - Retries connection failures, 429 and 5xx responses with exponential backoff and jitter.
  * - Never throws: failures are returned as a TransportResult.
+ * - Respects the circuit breaker: while the server is known to be down no request is made.
+ *   Diagnostic commands pass $force to probe the server regardless.
  */
 final class HttpTransport
 {
@@ -25,30 +27,43 @@ final class HttpTransport
     /** @var \Closure(int): void */
     private \Closure $sleeper;
 
+    private readonly CircuitBreaker $breaker;
+
     public function __construct(
         private readonly Options $options,
         private readonly HttpFactory $http,
         ?\Closure $sleeper = null,
+        ?CircuitBreaker $breaker = null,
     ) {
         $this->sleeper = $sleeper ?? static fn (int $ms) => usleep($ms * 1000);
+        $this->breaker = $breaker ?? new CircuitBreaker('', enabled: false);
     }
 
     /** @param array<string, mixed> $payload */
-    public function post(string $endpoint, array $payload, ?int $retries = null): TransportResult
+    public function post(string $endpoint, array $payload, ?int $retries = null, bool $force = false): TransportResult
     {
-        return $this->request('POST', $endpoint, $payload, $retries);
+        return $this->request('POST', $endpoint, $payload, $retries, $force);
     }
 
-    public function get(string $endpoint, ?int $retries = 0): TransportResult
+    public function get(string $endpoint, ?int $retries = 0, bool $force = false): TransportResult
     {
-        return $this->request('GET', $endpoint, null, $retries);
+        return $this->request('GET', $endpoint, null, $retries, $force);
+    }
+
+    public function breaker(): CircuitBreaker
+    {
+        return $this->breaker;
     }
 
     /** @param array<string, mixed>|null $payload */
-    private function request(string $method, string $endpoint, ?array $payload, ?int $retries): TransportResult
+    private function request(string $method, string $endpoint, ?array $payload, ?int $retries, bool $force): TransportResult
     {
         if (! $this->options->isUsable()) {
             return TransportResult::skipped('Monitoring is disabled or not configured.');
+        }
+
+        if (! $force && ! $this->breaker->allowsRequest()) {
+            return TransportResult::circuitOpen($this->breaker->retryIn());
         }
 
         $url = $this->options->apiBase().'/'.ltrim($endpoint, '/');
@@ -60,10 +75,17 @@ final class HttpTransport
             $last = $this->attempt($method, $url, $body);
 
             if ($last->successful() || ! $last->retryable || $attempt === $attempts) {
-                return $last;
+                break;
             }
 
             ($this->sleeper)($this->backoff($attempt, $last->retryAfter));
+        }
+
+        if ($last->retryable) {
+            $this->breaker->recordFailure($last->retryAfter);
+        } elseif ($last->status !== null) {
+            // The server answered (2xx or a permanent 4xx): it is reachable.
+            $this->breaker->recordSuccess();
         }
 
         return $last;

@@ -40,7 +40,7 @@ class TestCommand extends Command
         $this->components->twoColumnDetail('Project key', $options->projectKey());
         $this->components->twoColumnDetail('Secret', str_repeat('•', 8).' (hidden)');
 
-        $health = $transport->get('health');
+        $health = $transport->get('health', force: true);
         if (! $health->successful()) {
             $this->components->error('Central API unreachable: '.($health->error ?? 'HTTP '.$health->status));
 
@@ -48,7 +48,7 @@ class TestCommand extends Command
         }
         $this->components->twoColumnDetail('Central API', '<fg=green>reachable</>');
 
-        $config = $transport->get('config');
+        $config = $transport->get('config', force: true);
         if (! $config->successful()) {
             $this->components->error('Authentication failed: '.($config->error ?? 'HTTP '.$config->status));
 
@@ -59,7 +59,7 @@ class TestCommand extends Command
         $payload = $events->fromMessage('TrkMonitor test event from '.config('app.name'), 'info', new Scope, [
             'tags' => ['trk_monitor_test' => 'true'],
         ]);
-        $result = $transport->post('events', $payload);
+        $result = $transport->post('events', $payload, force: true);
 
         if (! $result->successful() || (int) data_get($result->body, 'data.accepted') !== 1) {
             $this->components->error('Test event rejected: '.($result->error ?? json_encode(data_get($result->body, 'data'))));

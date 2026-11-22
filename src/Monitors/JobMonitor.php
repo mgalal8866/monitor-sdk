@@ -14,6 +14,7 @@ use Throwable;
 use Trk\Monitor\Jobs\SendPayload;
 use Trk\Monitor\Monitor;
 use Trk\Monitor\Options;
+use Trk\Monitor\Performance\Span;
 use Trk\Monitor\Performance\Tracer;
 use Trk\Monitor\Performance\Transaction;
 use Trk\Monitor\Scope;
@@ -33,19 +34,34 @@ final class JobMonitor
 
     private ?string $jobId = null;
 
+    /** @var list<array{id: string, span: Span, transaction: Transaction}> Jobs running synchronously inside a transaction. */
+    private array $nested = [];
+
     public function __construct(
         private readonly Options $options,
         private readonly Monitor $monitor,
         private readonly Scope $scope,
         private readonly TraceContext $trace,
         private readonly Tracer $tracer,
+        private readonly QueueMonitor $queue,
     ) {}
 
     public function processing(JobProcessing $event): void
     {
         $this->safely(function () use ($event) {
+            // A job run synchronously inside a request/job is part of that transaction: it becomes
+            // a nested span instead of a new transaction, and the caller's scope is kept.
+            if ($event->connectionName === 'sync' && ($parent = $this->tracer->current()) !== null) {
+                if (! $this->ignored($event->job)) {
+                    $this->startNested($event->job, $parent);
+                }
+
+                return;
+            }
+
             $this->scope->clear();
             $this->trace->reset();
+            $this->tracer->reset();
             $this->transaction = null;
 
             if ($this->ignored($event->job)) {
@@ -53,7 +69,11 @@ final class JobMonitor
             }
 
             $name = $event->job->resolveName();
+            $payload = $this->payload($event->job);
             $context = $this->context($event->job, $event->connectionName);
+
+            // Continue the trace of whatever dispatched the job (invalid values start a new trace).
+            $this->trace->continueFrom(QueueMonitor::traceparentFrom($payload), QueueMonitor::tracestateFrom($payload));
 
             $this->jobId = $this->identity($event->job);
             $this->scope->setTransaction($name);
@@ -61,7 +81,7 @@ final class JobMonitor
             $this->scope->setTag('queue', (string) $event->job->getQueue());
             $this->scope->setContext('job', $context);
 
-            if ($transaction = $this->tracer->start($name, 'queue.job')) {
+            if ($transaction = $this->tracer->start($name, 'queue.job', [$name])) {
                 $transaction->contexts['job'] = $context;
                 $transaction->tags = ['job' => $name, 'queue' => (string) $event->job->getQueue()];
                 $this->transaction = $transaction;
@@ -72,6 +92,10 @@ final class JobMonitor
     public function processed(JobProcessed $event): void
     {
         $this->safely(function () use ($event) {
+            if ($this->finishNested($event->job, 'ok')) {
+                return;
+            }
+
             if ($this->ignored($event->job) || ! $this->isCurrent($event->job)) {
                 return;
             }
@@ -141,7 +165,43 @@ final class JobMonitor
             if ($this->isCurrent($event->job)) {
                 $this->finish('failed');
             }
+
+            $this->finishNested($event->job, 'failed');
         });
+    }
+
+    private function startNested(Job $job, Transaction $parent): void
+    {
+        $name = $job->resolveName();
+        $id = $this->identity($job);
+
+        // Reuse the dispatch span when the job was pushed from this transaction; otherwise open one.
+        $span = $this->queue->claim(QueueMonitor::spanIdFrom($this->payload($job)));
+
+        if ($span !== null) {
+            $span->data['sync'] = true;
+            $parent->nest($span);
+        } else {
+            $span = $parent->startSpan('queue.process', $name, ['connection' => 'sync', 'sync' => true], nest: true);
+        }
+
+        $this->nested[] = ['id' => $id, 'span' => $span, 'transaction' => $parent];
+    }
+
+    private function finishNested(Job $job, string $status): bool
+    {
+        $id = $this->identity($job);
+
+        foreach (array_reverse($this->nested, true) as $i => $entry) {
+            if ($entry['id'] === $id) {
+                $entry['transaction']->finishSpan($entry['span'], $status);
+                array_splice($this->nested, $i, 1);
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function finish(string $status): void

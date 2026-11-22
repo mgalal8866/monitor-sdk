@@ -136,7 +136,7 @@ it('spools undeliverable events and flushes them later', function () {
     expect(app(Spool::class)->count())->toBe(1);
 
     $online = true;
-    $this->artisan('trk-monitor:flush')->expectsOutputToContain('Sent 1')->assertSuccessful();
+    $this->artisan('trk-monitor:flush --force')->expectsOutputToContain('Sent 1')->assertSuccessful();
 
     expect(app(Spool::class)->count())->toBe(0);
 });

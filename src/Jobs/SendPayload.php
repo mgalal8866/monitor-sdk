@@ -46,7 +46,9 @@ final class SendPayload implements ShouldQueue
                 return;
             }
 
-            if ($this->attempts() >= $this->tries) {
+            // Server known to be down (or just went down): park the payload on disk and free the
+            // worker instead of keeping it busy with retries. trk-monitor:flush re-sends it later.
+            if ($result->circuitOpen || $transport->breaker()->isOpen() || $this->attempts() >= $this->tries) {
                 $spool->store($this->endpoint, $this->payload);
 
                 return;

@@ -12,6 +12,7 @@ use Throwable;
 use Trk\Monitor\Options;
 use Trk\Monitor\Performance\Tracer;
 use Trk\Monitor\Performance\Transaction;
+use Trk\Monitor\Support\TraceContext;
 
 /**
  * Measures incoming HTTP requests as `http.server` transactions.
@@ -28,13 +29,24 @@ final class TrackRequest
     public function __construct(
         private readonly Options $options,
         private readonly Tracer $tracer,
+        private readonly TraceContext $trace,
     ) {}
 
     public function handle(Request $request, Closure $next): Response
     {
         try {
+            // Each request starts its own trace (or continues the caller's); nothing leaks from a
+            // previous request handled by the same worker (Octane, RoadRunner…).
+            $this->tracer->reset();
+            $this->trace->reset();
+            $this->trace->continueFrom($request->headers->get('traceparent'), $request->headers->get('tracestate'));
+
             if (! $this->excludedPath($request)) {
-                $transaction = $this->tracer->start($request->getMethod().' /'.ltrim($request->path(), '/'), 'http.server');
+                $path = '/'.ltrim($request->path(), '/');
+                $transaction = $this->tracer->start($request->getMethod().' '.$path, 'http.server', [
+                    $request->getMethod().' '.$path,
+                    $path,
+                ]);
                 $request->attributes->set(self::ATTRIBUTE, $transaction);
             }
         } catch (Throwable) {

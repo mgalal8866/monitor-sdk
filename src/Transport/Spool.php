@@ -37,6 +37,16 @@ final class Spool
         }
     }
 
+    public function directory(): string
+    {
+        return $this->directory;
+    }
+
+    public function maxFiles(): int
+    {
+        return $this->maxFiles;
+    }
+
     public function count(): int
     {
         return count($this->files());

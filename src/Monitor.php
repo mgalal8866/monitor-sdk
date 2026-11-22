@@ -7,6 +7,7 @@ namespace Trk\Monitor;
 use Closure;
 use Illuminate\Support\Facades\Log;
 use Throwable;
+use Trk\Monitor\Performance\Tracer;
 use Trk\Monitor\Transport\Delivery;
 use Trk\Monitor\Transport\HttpTransport;
 use Trk\Monitor\Transport\TransportResult;
@@ -63,6 +64,9 @@ class Monitor
 
             $payload = $this->events->fromException($e, $this->scope, $overrides);
             $this->captured[$e] = $payload['event_id'];
+
+            // Error-triggered sampling: keep the surrounding transaction so the error has its trace.
+            app(Tracer::class)->errorCaptured();
 
             return $this->dispatchEvent($payload);
         });
@@ -156,10 +160,19 @@ class Monitor
      */
     public function sendRelease(array $release): TransportResult
     {
-        return $this->transport->post('releases', array_filter($release + [
+        return $this->transport->post('releases', $this->releasePayload($release), retries: 1, force: true);
+    }
+
+    /**
+     * @param  array<string, mixed>  $release
+     * @return array<string, mixed>
+     */
+    public function releasePayload(array $release): array
+    {
+        return array_filter($release + [
             'environment' => $this->options->environment(),
             'sdk_version' => self::VERSION,
-        ], fn ($v) => $v !== null && $v !== ''));
+        ], fn ($v) => $v !== null && $v !== '');
     }
 
     /** Sends buffered events now (e.g. at the end of a long-running command). */

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Trk\Monitor;
 
+use Illuminate\Support\Str;
+
 /**
  * Validated, typed view over config/trk-monitor.php.
  * Invalid values fall back to safe defaults and are reported by `trk-monitor:status`.
@@ -97,6 +99,66 @@ final class Options
         return is_numeric($rate) ? max(0.0, min(1.0, (float) $rate)) : 1.0;
     }
 
+    /**
+     * Sample rate for a transaction. The most specific rule wins:
+     *  1. `sampling.routes` (HTTP) or `sampling.jobs` (queue) — first matching pattern;
+     *  2. `sampling.environments[<environment>]`;
+     *  3. `sampling.transactions`.
+     *
+     * @param  list<string>  $candidates  Values matched against the patterns (e.g. "GET /api/orders", "api/orders").
+     */
+    public function transactionSampleRate(string $op, array $candidates): float
+    {
+        $rules = (array) $this->get($op === 'queue.job' ? 'sampling.jobs' : 'sampling.routes', []);
+
+        foreach ($rules as $pattern => $rate) {
+            if (! is_string($pattern) || ! is_numeric($rate)) {
+                continue;
+            }
+
+            foreach ($candidates as $candidate) {
+                if (Str::is($pattern, $candidate) || Str::is(ltrim($pattern, '/'), ltrim($candidate, '/'))) {
+                    return max(0.0, min(1.0, (float) $rate));
+                }
+            }
+        }
+
+        $byEnvironment = $this->get('sampling.environments.'.$this->environment());
+
+        if (is_numeric($byEnvironment)) {
+            return max(0.0, min(1.0, (float) $byEnvironment));
+        }
+
+        return $this->sampleRate('transactions');
+    }
+
+    /** Follow the sampling decision of an incoming traceparent (W3C "sampled" flag). */
+    public function respectParentSampling(): bool
+    {
+        return filter_var($this->get('sampling.respect_parent', true), FILTER_VALIDATE_BOOL);
+    }
+
+    public function tracing(string $key, mixed $default = true): mixed
+    {
+        return $this->get("tracing.{$key}", $default);
+    }
+
+    /** Whether trace headers may be added to an outgoing request to $host. */
+    public function propagatesTo(string $host): bool
+    {
+        if (! filter_var($this->tracing('propagate', true), FILTER_VALIDATE_BOOL)) {
+            return false;
+        }
+
+        foreach ((array) $this->tracing('propagation_targets', ['*']) as $pattern) {
+            if (is_string($pattern) && Str::is(strtolower($pattern), strtolower($host))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function timeout(): float
     {
         $value = $this->get('server.timeout', 3);
@@ -106,14 +168,47 @@ final class Options
 
     public function connectTimeout(): float
     {
-        $value = $this->get('server.connect_timeout', 2);
+        $value = $this->get('server.connect_timeout', 1);
 
-        return is_numeric($value) && $value > 0 ? min(30.0, (float) $value) : 2.0;
+        return is_numeric($value) && $value > 0 ? min(30.0, (float) $value) : 1.0;
     }
 
     public function retries(): int
     {
         return max(0, min(10, (int) $this->get('server.retries', 3)));
+    }
+
+    /** HTTP retries for payloads sent from inside a request or command (not from a queue worker). */
+    public function inlineRetries(): int
+    {
+        return max(0, min(3, (int) $this->get('server.inline_retries', 0)));
+    }
+
+    public function circuitBreakerEnabled(): bool
+    {
+        return filter_var($this->get('circuit_breaker.enabled', true), FILTER_VALIDATE_BOOL);
+    }
+
+    /** Seconds the SDK stops contacting the server after a failure (doubles on repeated failures). */
+    public function circuitBreakerCooldown(): int
+    {
+        return max(1, min(3600, (int) $this->get('circuit_breaker.cooldown', 30)));
+    }
+
+    public function circuitBreakerMaxCooldown(): int
+    {
+        return max($this->circuitBreakerCooldown(), min(86400, (int) $this->get('circuit_breaker.max_cooldown', 300)));
+    }
+
+    /** Maximum number of payloads kept on disk while the server is unreachable. */
+    public function spoolMaxFiles(): int
+    {
+        return max(0, min(100000, (int) $this->get('spool.max_files', 1000)));
+    }
+
+    public function spoolAutoFlush(): bool
+    {
+        return filter_var($this->get('spool.auto_flush', true), FILTER_VALIDATE_BOOL);
     }
 
     public function signRequests(): bool

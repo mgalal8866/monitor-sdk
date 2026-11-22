@@ -12,15 +12,18 @@ use Trk\Monitor\Support\TraceContext;
 use Trk\Monitor\Transport\Delivery;
 
 /**
- * Owns the transaction of the current execution (one HTTP request or one queue job).
+ * Owns the transactions of the current execution (one HTTP request or one queue job).
  *
- * Sampling: `sampling.transactions` decides which normal transactions are reported.
- * Slow, failed (5xx) and long-running transactions are always reported. Error events have
- * their own, independent sampling rule.
+ * Sampling (decided once, when the transaction starts):
+ *  - an incoming traceparent's sampled flag is followed (`sampling.respect_parent`);
+ *  - otherwise route/job rules, then the environment rule, then `sampling.transactions`.
+ * Slow, failed (5xx / failed job) transactions and transactions during which an error was
+ * captured are always reported. Error events have their own, independent sampling rule.
  */
 final class Tracer
 {
-    private ?Transaction $current = null;
+    /** @var list<Transaction> */
+    private array $stack = [];
 
     public function __construct(
         private readonly Options $options,
@@ -29,25 +32,56 @@ final class Tracer
         private readonly Sanitizer $sanitizer,
     ) {}
 
-    public function start(string $name, string $op): ?Transaction
+    /** @param list<string> $samplingCandidates Values matched against `sampling.routes` / `sampling.jobs`. */
+    public function start(string $name, string $op, array $samplingCandidates = []): ?Transaction
     {
-        if (! $this->options->isUsable() || ! $this->options->captures('performance') || ! $this->options->captures('transactions')) {
+        if (! $this->enabled()) {
             return null;
         }
 
-        return $this->current = new Transaction(
+        $transaction = new Transaction(
             name: $name,
             op: $op,
             traceId: $this->trace->traceId(),
             parentSpanId: $this->trace->parentSpanId(),
-            sampled: $this->sampled(),
+            sampled: $this->sampled($op, $samplingCandidates === [] ? [$name] : $samplingCandidates),
             maxSpans: max(1, (int) $this->options->get('performance.max_spans_per_transaction', 100)),
+            // The transaction is this execution's span: error events and propagated headers use it.
+            spanId: $this->trace->spanId(),
         );
+
+        return $this->stack[] = $transaction;
+    }
+
+    public function enabled(): bool
+    {
+        return $this->options->isUsable() && $this->options->captures('performance') && $this->options->captures('transactions');
     }
 
     public function current(): ?Transaction
     {
-        return $this->current;
+        return $this->stack === [] ? null : $this->stack[array_key_last($this->stack)];
+    }
+
+    /** The span outgoing calls originate from (innermost nested span), or this execution's span. */
+    public function activeSpanId(): string
+    {
+        return $this->current()?->activeSpanId() ?? $this->trace->spanId();
+    }
+
+    /** Sampling flag to propagate downstream. */
+    public function sampledFlag(): bool
+    {
+        return $this->current()->sampled ?? ($this->trace->parentSampled() ?? true);
+    }
+
+    /** Called when an error event is captured: the surrounding transaction is always kept. */
+    public function errorCaptured(): void
+    {
+        if ($transaction = $this->current()) {
+            $transaction->keep();
+            $transaction->tags['has_error'] = 'true';
+        }
     }
 
     /** Finishes and reports the transaction when sampled or flagged. Never throws. */
@@ -79,23 +113,43 @@ final class Tracer
         } catch (Throwable) {
             // Performance monitoring must never affect the application.
         } finally {
-            if ($this->current === $transaction) {
-                $this->current = null;
+            $this->remove($transaction);
+        }
+    }
+
+    /** Drops the transaction without reporting it (e.g. excluded route). */
+    public function discard(Transaction $transaction): void
+    {
+        $this->remove($transaction);
+    }
+
+    /** Forgets every open transaction (start of a new request in long-running workers). */
+    public function reset(): void
+    {
+        $this->stack = [];
+    }
+
+    private function remove(Transaction $transaction): void
+    {
+        foreach ($this->stack as $i => $open) {
+            if ($open === $transaction) {
+                array_splice($this->stack, $i, 1);
+
+                return;
             }
         }
     }
 
-    /** Drops the current transaction without reporting it (e.g. excluded route). */
-    public function discard(Transaction $transaction): void
+    /** @param list<string> $candidates */
+    private function sampled(string $op, array $candidates): bool
     {
-        if ($this->current === $transaction) {
-            $this->current = null;
-        }
-    }
+        $parent = $this->trace->parentSampled();
 
-    private function sampled(): bool
-    {
-        $rate = $this->options->sampleRate('transactions');
+        if ($parent !== null && $this->options->respectParentSampling()) {
+            return $parent;
+        }
+
+        $rate = $this->options->transactionSampleRate($op, $candidates);
 
         return $rate >= 1.0 || ($rate > 0.0 && mt_rand() / mt_getrandmax() < $rate);
     }

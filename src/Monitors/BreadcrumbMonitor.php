@@ -94,7 +94,8 @@ final class BreadcrumbMonitor
     {
         $server = (string) $this->options->get('server.url', '');
 
-        return $server !== '' && str_starts_with($url, rtrim($server, '/').'/');
+        // Only the SDK's own ingestion API is skipped; other paths on the same host are instrumented.
+        return $server !== '' && str_starts_with($url, $this->options->apiBase().'/');
     }
 
     private function stripQuery(string $url): string

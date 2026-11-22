@@ -8,8 +8,11 @@ namespace Trk\Monitor\Performance;
  * A complete monitored operation: an HTTP request or a queue job.
  *
  * Counters (query count, database time, slow queries) are always maintained. Spans are kept
- * for sampled transactions; unsampled transactions keep only slow spans so that a slow
+ * for sampled transactions; unsampled transactions keep only slow query spans so that a slow
  * request can still be reported with its culprit query.
+ *
+ * Parent-child relationships: spans started with `nest: true` become the parent of every span
+ * started (or query recorded) until they finish; otherwise spans hang off the transaction.
  */
 final class Transaction
 {
@@ -23,6 +26,9 @@ final class Transaction
 
     /** @var list<Span> */
     private array $spans = [];
+
+    /** @var list<Span> Spans currently acting as parent for new spans. */
+    private array $active = [];
 
     private int $droppedSpans = 0;
 
@@ -55,12 +61,66 @@ final class Transaction
         public readonly ?string $parentSpanId,
         public readonly bool $sampled,
         private readonly int $maxSpans = 100,
+        ?string $spanId = null,
     ) {
-        $this->spanId = bin2hex(random_bytes(8));
+        $this->spanId = $spanId ?? bin2hex(random_bytes(8));
         $this->startTimestamp = microtime(true);
         $this->startHr = hrtime(true);
     }
 
+    /** Wall-clock timestamp of "now", derived from the monotonic clock for consistent ordering. */
+    public function now(): float
+    {
+        return $this->startTimestamp + (hrtime(true) - $this->startHr) / 1_000_000_000;
+    }
+
+    /** The span new children attach to: the innermost active nested span, or the transaction. */
+    public function activeSpanId(): string
+    {
+        return $this->active === [] ? $this->spanId : $this->active[array_key_last($this->active)]->spanId;
+    }
+
+    /**
+     * Starts a span. A span is always returned (its id is used for trace propagation) but it is
+     * only stored when the transaction is sampled and the span limit has not been reached.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    public function startSpan(string $op, string $description, array $data = [], bool $nest = false): Span
+    {
+        $span = new Span($this->activeSpanId(), $op, $description, $this->now(), data: $data);
+
+        if ($this->sampled) {
+            $this->store($span);
+        }
+
+        if ($nest) {
+            $this->active[] = $span;
+        }
+
+        return $span;
+    }
+
+    /** Makes an already started span the parent of subsequent spans until it finishes. */
+    public function nest(Span $span): void
+    {
+        $this->active[] = $span;
+    }
+
+    /** Finishes a span and, if it was nesting, stops using it as parent. */
+    public function finishSpan(Span $span, ?string $status = null): void
+    {
+        $span->finish($status);
+
+        foreach ($this->active as $i => $active) {
+            if ($active === $span) {
+                array_splice($this->active, $i, 1);
+                break;
+            }
+        }
+    }
+
+    /** @param array<string, mixed> $data */
     public function recordQuery(string $sql, float $durationMs, bool $slow, array $data, bool $keepSpan): void
     {
         $this->queryCount++;
@@ -75,20 +135,14 @@ final class Transaction
             return;
         }
 
-        if (count($this->spans) >= $this->maxSpans) {
-            $this->droppedSpans++;
-
-            return;
-        }
-
-        $this->spans[] = new Span(
-            parentSpanId: $this->spanId,
+        $this->store(new Span(
+            parentSpanId: $this->activeSpanId(),
             op: 'db.query',
             description: $sql,
-            startTimestamp: microtime(true) - $durationMs / 1000,
+            startTimestamp: $this->now() - $durationMs / 1000,
             durationMs: $durationMs,
             data: $data + ['slow' => $slow],
-        );
+        ));
     }
 
     /** Forces the transaction to be reported even if it was not sampled. */
@@ -104,6 +158,16 @@ final class Transaction
 
     public function finish(): float
     {
+        if ($this->durationMs === null) {
+            // Spans still open when the transaction ends (e.g. a request that threw) are closed here.
+            foreach ($this->spans as $span) {
+                if (! $span->isFinished()) {
+                    $span->finish('cancelled');
+                }
+            }
+            $this->active = [];
+        }
+
         return $this->durationMs ??= (hrtime(true) - $this->startHr) / 1_000_000;
     }
 
@@ -154,6 +218,7 @@ final class Transaction
                 'slow_query_count' => $this->slowQueryCount,
                 'memory_peak_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
                 'dropped_spans' => $this->droppedSpans,
+                'span_count' => count($this->spans),
             ],
             'tags' => $this->tags,
             'contexts' => $this->contexts,
@@ -161,5 +226,16 @@ final class Transaction
             'spans' => array_map(fn (Span $s) => $s->toArray(), $this->spans),
             'sdk' => ['name' => 'trk/laravel-monitor', 'version' => $sdkVersion],
         ], fn ($v) => $v !== null && $v !== []);
+    }
+
+    private function store(Span $span): void
+    {
+        if (count($this->spans) >= $this->maxSpans) {
+            $this->droppedSpans++;
+
+            return;
+        }
+
+        $this->spans[] = $span;
     }
 }

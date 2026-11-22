@@ -18,6 +18,8 @@ use Trk\Monitor\Options;
  *     (application terminating), or immediately when running in the console.
  *
  * Payloads that cannot be delivered because the server is unreachable are spooled to disk.
+ * While the circuit breaker is open (server known to be down) payloads go straight to the
+ * spool: no network call, no queued job, no added latency for the application.
  */
 final class Delivery
 {
@@ -25,6 +27,9 @@ final class Delivery
     private array $buffer = [];
 
     private bool $terminatingHookRegistered = false;
+
+    /** Set when dispatching to the queue failed once; avoids paying for a broken queue repeatedly. */
+    private bool $queueUnavailable = false;
 
     public function __construct(
         private readonly Options $options,
@@ -36,29 +41,40 @@ final class Delivery
     /** @param array<string, mixed> $payload */
     public function send(string $endpoint, array $payload): void
     {
-        if (! $this->options->isUsable()) {
-            return;
-        }
+        try {
+            if (! $this->options->isUsable()) {
+                return;
+            }
 
-        if ($this->options->queueEnabled() && $this->queueIsAsync()) {
-            try {
-                SendPayload::dispatch($endpoint, $payload)
-                    ->onConnection($this->options->queueConnection())
-                    ->onQueue($this->options->queueName());
+            if ($this->transport->breaker()->isOpen()) {
+                $this->spool->store($endpoint, $payload);
 
                 return;
-            } catch (Throwable) {
-                // Queue unavailable: fall through to deferred delivery.
             }
-        }
 
-        $this->defer($endpoint, $payload);
+            if ($this->options->queueEnabled() && ! $this->queueUnavailable && $this->queueIsAsync()) {
+                try {
+                    SendPayload::dispatch($endpoint, $payload)
+                        ->onConnection($this->options->queueConnection())
+                        ->onQueue($this->options->queueName());
+
+                    return;
+                } catch (Throwable) {
+                    // Queue unavailable: fall through to deferred delivery for the rest of this process.
+                    $this->queueUnavailable = true;
+                }
+            }
+
+            $this->defer($endpoint, $payload);
+        } catch (Throwable) {
+            // Monitoring must never affect the application.
+        }
     }
 
-    /** Sends immediately, bypassing queue and buffer (used by commands). */
+    /** Sends immediately, bypassing queue, buffer and circuit breaker (used by commands). */
     public function sendNow(string $endpoint, array $payload): TransportResult
     {
-        return $this->transport->post($endpoint, $payload);
+        return $this->transport->post($endpoint, $payload, force: true);
     }
 
     /** Sends every buffered payload. Safe to call multiple times. */
@@ -68,7 +84,9 @@ final class Delivery
         $this->buffer = [];
 
         foreach ($buffer as [$endpoint, $payload]) {
-            $result = $this->transport->post($endpoint, $payload);
+            // No HTTP-level retries inside the request lifecycle: one failure opens the circuit
+            // and the remaining payloads are spooled without touching the network.
+            $result = $this->transport->post($endpoint, $payload, retries: $this->options->inlineRetries());
 
             if (! $result->successful() && $result->retryable) {
                 $this->spool->store($endpoint, $payload);

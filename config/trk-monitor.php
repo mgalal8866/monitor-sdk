@@ -24,11 +24,37 @@ return [
         // Base URL of the TrkMonitor central application, e.g. https://monitor.example.com
         'url' => env('TRK_MONITOR_URL'),
         'timeout' => (float) env('TRK_MONITOR_TIMEOUT', 3),
-        'connect_timeout' => (float) env('TRK_MONITOR_CONNECT_TIMEOUT', 2),
+        'connect_timeout' => (float) env('TRK_MONITOR_CONNECT_TIMEOUT', 1),
         // Sign requests with HMAC instead of sending the secret (recommended).
         'sign_requests' => env('TRK_MONITOR_SIGN_REQUESTS', true),
         'compress' => env('TRK_MONITOR_COMPRESS', true),
+        // Retries for commands such as trk-monitor:flush.
         'retries' => (int) env('TRK_MONITOR_RETRIES', 3),
+        // Retries for payloads sent inside a request/command lifecycle. Keep at 0 so an
+        // unreachable server costs at most one timeout before the circuit opens.
+        'inline_retries' => (int) env('TRK_MONITOR_INLINE_RETRIES', 0),
+    ],
+
+    /*
+    | Circuit breaker. When the central server is unreachable (timeout, connection error,
+    | 429 or 5xx) the SDK stops contacting it for `cooldown` seconds, doubling up to
+    | `max_cooldown` while it stays down. Payloads are spooled to disk meanwhile, so the
+    | application never waits on a dead server.
+    */
+    'circuit_breaker' => [
+        'enabled' => env('TRK_MONITOR_CIRCUIT_BREAKER', true),
+        'cooldown' => (int) env('TRK_MONITOR_CIRCUIT_COOLDOWN', 30),
+        'max_cooldown' => (int) env('TRK_MONITOR_CIRCUIT_MAX_COOLDOWN', 300),
+    ],
+
+    /*
+    | Disk spool for payloads that could not be delivered. Bounded: when full, new payloads
+    | are dropped (the application is never affected). With `auto_flush` the package
+    | schedules `trk-monitor:flush` every minute (requires the Laravel scheduler).
+    */
+    'spool' => [
+        'max_files' => (int) env('TRK_MONITOR_SPOOL_MAX_FILES', 1000),
+        'auto_flush' => env('TRK_MONITOR_SPOOL_AUTO_FLUSH', true),
     ],
 
     'capture' => [
@@ -53,11 +79,40 @@ return [
         'name' => env('TRK_MONITOR_QUEUE_NAME', 'monitoring'),
     ],
 
+    /*
+    | Sampling. Errors are sampled independently: an exception is never dropped because
+    | transaction sampling is low. Transactions are always reported when slow, failed or
+    | when an error was captured during them, whatever their sample rate.
+    |
+    | Transaction rate precedence: routes/jobs rule > environment rule > `transactions`.
+    */
     'sampling' => [
         'errors' => 1.0,
         'transactions' => 0.1,
         'queries' => 0.1,
         'logs' => 1.0,
+        // e.g. ['staging' => 1.0, 'production' => 0.05]
+        'environments' => [],
+        // Patterns matched against "METHOD /path" and the request path, e.g.
+        // ['api/checkout*' => 1.0, 'GET /search' => 0.01, 'admin/*' => 0]
+        'routes' => [],
+        // Patterns matched against the job class, e.g. ['App\Jobs\Sync*' => 0.5]
+        'jobs' => [],
+        // Follow the sampled flag of an incoming W3C traceparent, so a trace is complete.
+        'respect_parent' => true,
+    ],
+
+    /*
+    | Distributed tracing (W3C Trace Context). `traceparent`/`tracestate` are added to
+    | outgoing HTTP requests (never overriding headers the application already set) and
+    | to queued job payloads, so jobs continue the trace that dispatched them.
+    */
+    'tracing' => [
+        'propagate' => env('TRK_MONITOR_TRACE_PROPAGATION', true),
+        // Hosts (wildcards allowed) that receive trace headers, e.g. ['*.internal', 'api.example.com']
+        'propagation_targets' => ['*'],
+        'http_client_spans' => true,
+        'queue_spans' => true,
     ],
 
     /*

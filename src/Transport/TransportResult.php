@@ -14,7 +14,14 @@ final readonly class TransportResult
         public bool $retryable = false,
         public ?int $retryAfter = null,
         public bool $skipped = false,
+        public bool $circuitOpen = false,
     ) {}
+
+    /** The request was not attempted because the central server is known to be down. */
+    public static function circuitOpen(int $retryIn): self
+    {
+        return new self(status: null, error: "Central server unavailable; next attempt in {$retryIn}s.", retryable: true, circuitOpen: true);
+    }
 
     public static function failed(string $error, bool $retryable = false): self
     {

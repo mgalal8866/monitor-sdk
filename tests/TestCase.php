@@ -9,6 +9,15 @@ abstract class TestCase extends Orchestra
 {
     public const SECRET = 'trk_sk_test_secret_0123456789abcdef';
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Circuit-breaker and spool state live on disk; never leak them between tests.
+        @unlink(storage_path('framework/trk-monitor/circuit.json'));
+        array_map('unlink', glob(storage_path('framework/trk-monitor/spool').'/*.json') ?: []);
+    }
+
     protected function getPackageProviders($app): array
     {
         return [TrkMonitorServiceProvider::class];
