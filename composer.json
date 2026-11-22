@@ -1,0 +1,60 @@
+{
+    "name": "trk/laravel-monitor",
+    "description": "Laravel SDK for TrkMonitor: automatic error tracking and application monitoring.",
+    "type": "library",
+    "license": "proprietary",
+    "keywords": ["laravel", "monitoring", "error-tracking", "apm", "trkmonitor"],
+    "require": {
+        "php": "^8.2",
+        "ext-json": "*",
+        "illuminate/console": "^11.0|^12.0|^13.0",
+        "illuminate/contracts": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0",
+        "illuminate/queue": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "guzzlehttp/guzzle": "^7.8|^8.0",
+        "symfony/process": "^7.0|^8.0"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.18",
+        "orchestra/testbench": "^9.0|^10.0|^11.0",
+        "pestphp/pest": "^3.0|^4.0|^5.0",
+        "larastan/larastan": "^3.0"
+    },
+    "suggest": {
+        "ext-zlib": "Compresses payloads with gzip before transmission."
+    },
+    "autoload": {
+        "psr-4": {
+            "Trk\\Monitor\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Trk\\Monitor\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Trk\\Monitor\\TrkMonitorServiceProvider"
+            ],
+            "aliases": {
+                "Monitor": "Trk\\Monitor\\Facades\\Monitor"
+            }
+        }
+    },
+    "scripts": {
+        "test": "pest",
+        "lint": "pint --test",
+        "analyse": "phpstan analyse"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
